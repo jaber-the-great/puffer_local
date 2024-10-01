@@ -39,9 +39,12 @@ void Puffer::video_chunk_acked(Chunk && c)
   }
 }
 
+// This function is called by the client wc to select the next video format
 VideoFormat Puffer::select_video_format()
 {
   reinit();
+  // Getting the bset format from update_value function, update_value function calls get_qvalue function
+  // get_qvalue function calls get_value function and directly works with sending time probability
   size_t ret_format = update_value(0, curr_buffer_, 0);
   return client_.channel()->vformats()[ret_format];
 }
@@ -151,10 +154,12 @@ size_t Puffer::update_value(size_t i, size_t curr_buffer, size_t curr_format)
     if (best_next_format == num_formats_ or qvalue > max_qvalue) {
       max_qvalue = qvalue;
       best_next_format = next_format;
+    // When best_next_format is sleected, log the selected time to transfer for that chunk 
+
     }
   }
   v_[i][curr_buffer][curr_format] = max_qvalue;
-
+  // Retrievs the best formt 
   return best_next_format;
 }
 

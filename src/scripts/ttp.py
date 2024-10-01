@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+'''
+This script is designed to either train a new model or retrain existing models (via continual learning), 
+using time-series data collected from streaming sessions, and optimizes the model to predict transmission 
+times based on various network conditions.
+'''
+
 import sys
 import json
 import argparse
@@ -10,10 +16,14 @@ from datetime import datetime, timedelta
 import numpy as np
 from multiprocessing import Process
 import gc
+import pandas as pd 
 
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 from helpers import (
     connect_to_influxdb, connect_to_postgres,
@@ -169,6 +179,7 @@ class Model:
 
         return correct / total
 
+    # makes predictions on input data and maps the output to the discretized bin values
     def predict(self, input_data):
         with torch.no_grad():
             x = torch.from_numpy(input_data).to(device=DEVICE)
@@ -218,6 +229,8 @@ class Model:
             json.dump(meta, fh)
 
 
+# Validates command-line arguments to ensure correct inputs and parameters are provided. It checks if model directories exist,
+# if inference/tuning options are used correctly, and if GPU is available when required.
 def check_args(args):
     if args.load_model:
         if not path.isdir(args.load_model):
@@ -294,6 +307,8 @@ def check_args(args):
         NUM_EPOCHS = 300
 
 
+# This function computes the transmission time (trans_time) for video chunks by comparing the time they were sent (sent_ts)
+# with the time they were acknowledged (acked_ts). It also extracts relevant TCP metrics like delivery_rate, cwnd, rtt, etc.
 def calculate_trans_times(video_sent_results, video_acked_results,
                           cc, postgres_cursor):
     d = {}
@@ -359,10 +374,18 @@ def calculate_trans_times(video_sent_results, video_acked_results,
         acked_ts = np.datetime64(pt['time'])
         dsv['acked_ts'] = acked_ts
         dsv['trans_time'] = (acked_ts - sent_ts) / np.timedelta64(1, 's')
+    
+    # print the first 1 records of the dictionary
+    # for i, (k, v) in enumerate(d.items()):
+    #     if i == 1:
+    #         break
+    #     print(k, v)
 
     return d
 
 
+# This function retrieves data from InfluxDB and PostgreSQL, using time-based filters if provided, 
+# and then processes it into structured form with the help of calculate_trans_times().
 def prepare_raw_data(yaml_settings_path, time_start, time_end, cc):
     with open(yaml_settings_path, 'r') as fh:
         yaml_settings = yaml.safe_load(fh)
@@ -404,6 +427,8 @@ def prepare_raw_data(yaml_settings_path, time_start, time_end, cc):
     return ret
 
 
+# Appends historical chunk data, including features like delivery_rate, cwnd, and trans_time, 
+# to the input vector. If past data is missing, it pads the input vector with the nearest available chunk data.
 def append_past_chunks(ds, next_ts, row):
     i = 1
     past_chunks = []
@@ -438,6 +463,8 @@ def append_past_chunks(ds, next_ts, row):
     row += past_chunks
 
 
+# Converts the processed raw data into input-output pairs for the model. It uses append_past_chunks() to construct the input vectors
+# and appends TCP information like delivery_rate, rtt, and trans_time.
 # return FUTURE_CHUNKS pairs of (raw_in, raw_out)
 def prepare_input_output(d):
     ret = [{'in':[], 'out':[]} for _ in range(Model.FUTURE_CHUNKS)]
@@ -471,10 +498,15 @@ def prepare_input_output(d):
                     assert(len(row_i) == Model.DIM_IN)
                     ret[i]['in'].append(row_i)
                     ret[i]['out'].append(ds[ts]['trans_time'])
-
+    # print the first 1 record of the dictionary
+    # print(f'{len(ret)} total number of records preprae input output')
+    # print(len(ret[0]['in']))
+    # print(ret[0]['out'])
     return ret
 
 
+# Samples data for continual learning (CL) from the last CL_MAX_DAYS days. It applies a discount factor (CL_DISCOUNT) to prioritize recent data and calls prepare_input_output() to structure the data.
+# Used in the continual learning process, this function samples and prepares the training data based on time windows. It helps the model train using more recent data without forgetting past trends.
 def cl_sample(args, time_start, time_end, max_size, ret):
     raw_data = prepare_raw_data(args.yaml_settings,
                                 time_start, time_end, args.cc)
@@ -500,6 +532,8 @@ def cl_sample(args, time_start, time_end, max_size, ret):
     return ret_sample_size
 
 
+# Prepares data specifically for continual learning by invoking cl_sample() across multiple time windows, from recent days to older ones. The sampling size is adjusted by day using weights.
+# This function is called when --cl (continual learning) is enabled. It handles the logic for gathering training data across multiple days to ensure continual learning is based on recent trends.
 def prepare_cl_data(args):
     # calculate sampling weights and max data size to sample
     total_weights = 0
@@ -537,6 +571,7 @@ def prepare_cl_data(args):
     return ret
 
 
+# Prints the distribution of output labels (transmission times in bins) and shows the single-label accuracy.
 def print_stats(i, output_data):
     # print label distribution
     bin_sizes = np.zeros(Model.BIN_MAX + 1, dtype=int)
@@ -552,6 +587,7 @@ def print_stats(i, output_data):
                      .format(i, 100 * np.max(bin_sizes) / len(output_data)))
 
 
+# Plots training and validation loss over epochs and saves the graph to a file.
 def plot_loss(losses, figure_path):
     fig, ax = plt.subplots()
 
@@ -569,6 +605,8 @@ def plot_loss(losses, figure_path):
     sys.stderr.write('Saved plot to {}\n'.format(figure_path))
 
 
+# Trains the model by processing the input data in batches, calculating the loss, and updating model weights using backpropagation. It handles training and validation if TUNING is enabled.
+# Core function for training the neural network model. It's called within train_or_eval_model() to handle the actual training loop, update the model, and save checkpoints.
 def train(i, args, model, input_data, output_data):
     if TUNING:
         # permutate input and output data before splitting
@@ -599,6 +637,11 @@ def train(i, args, model, input_data, output_data):
     num_batches = int(np.ceil(num_training / BATCH_SIZE))
     sys.stderr.write('[{}] total epochs: {}\n'.format(i, NUM_EPOCHS))
 
+    # csv_file = f'transmission-values-{i}.csv'
+    # trans_val_df = pd.read_csv(csv_file)
+
+    predictions_list = []  # stores predictions
+
     # loop over the entire dataset multiple times
     for epoch_id in range(1, 1 + NUM_EPOCHS):
         # permutate data in each epoch
@@ -614,8 +657,18 @@ def train(i, args, model, input_data, output_data):
             batch_input = input_data[batch_indices]
             batch_output = output_data[batch_indices]
 
+            # get predictions for the batch
+            model.set_model_eval()
+            predictions = model.predict(batch_input)
+            predictions_list.append(predictions)
+            model.set_model_train()
+
+            # trans_val_df.loc[batch_indices, 'Predicted'] = predictions
+
             running_loss += model.train_step(batch_input, batch_output)
         running_loss /= num_batches
+
+        # trans_val_df.to_csv(csv_file, index=False)
 
         # print info
         if TUNING:
@@ -639,7 +692,7 @@ def train(i, args, model, input_data, output_data):
             train_losses.append(running_loss)
             sys.stderr.write('[{}] epoch {}: training loss {:.3f}\n'
                              .format(i, epoch_id, running_loss))
-
+   
         # save checkpoints or the final model
         if epoch_id % CHECKPOINT == 0 or epoch_id == NUM_EPOCHS:
             if epoch_id == NUM_EPOCHS:
@@ -672,8 +725,11 @@ def train(i, args, model, input_data, output_data):
             plot_loss(losses, loss_path)
 
 
+# Handles both training and evaluation of the model. It creates or loads a model, normalizes input data, and either trains the model or evaluates its performance based on the provided arguments.
+# It is called for each future chunk (model) during training or inference. It is a wrapper that calls training or evaluation depending on the command-line flags. This function also prints stats and saves models.
 def train_or_eval_model(i, args, raw_in_data, raw_out_data):
     # does not seem to benefit from intra-op parallelism
+    # print(raw_out_data)
     torch.set_num_threads(1)
 
     # create or load a model
@@ -700,17 +756,59 @@ def train_or_eval_model(i, args, raw_in_data, raw_out_data):
     if args.inference:
         model.set_model_eval()
 
-        sys.stderr.write('[{}] test set size: {}\n'.format(i, len(input_data)))
-        sys.stderr.write('[{}] loss: {:.3f}, accuracy: {:.2f}%\n'
-            .format(i, model.compute_loss(input_data, output_data),
-                    100 * model.compute_accuracy(input_data, output_data)))
+        
+        # sys.stderr.write('[{}] loss: {:.3f}, accuracy: {:.2f}%\n'
+        #     .format(i, model.compute_loss(input_data, output_data),
+        #             100 * model.compute_accuracy(input_data, output_data)))
+        # # print input_data and output_data
+        
+        # sys.stderr.write('[{}] input_data: {}\n'.format(i, input_data))
+        # sys.stderr.write('[{}] output_data: {}\n'.format(i, output_data))
+
+        # # print len input data
+        # sys.stderr.write('[{}] len input_data: {}\n'.format(i, len(input_data)))
+        # sys.stderr.write('[{}] len each record input : {}\n'.format(i, len(input_data[0])))
+        # sys.stderr.write('[{}] len output_data: {}\n'.format(i, len(output_data)))
+        # sys.stderr.write('[{}] len each record output : {}\n'.format(i, len(output_data)))
+        if i == 0:
+            sys.stderr.write('[{}] test set size: {}\n'.format(i, len(input_data)))
+            predictions = model.predict(input_data)
+
+
+            # Display or return the predictions
+            sys.stderr.write('[{}] raw output data:\n'.format(i))
+            sys.stderr.write('{}\n'.format(raw_out_data))
+            sys.stderr.write('[{}] predictions:\n'.format(i))
+            sys.stderr.write('{}\n'.format(predictions))
+            mse = calculate_mean_squared_error(predictions, raw_out_data)
+            sys.stderr.write('[{}] Mean squared error:\n'.format(i))
+            sys.stderr.write('{}\n'.format(mse))
     else:  # training
+        
         model.set_model_train()
 
         # train a neural network with data
         train(i, args, model, input_data, output_data)
 
 
+def calculate_mean_squared_error(predictions, actual):
+    sum = 0
+    print("Length of predictions: ", len(predictions))
+    print("Length of actual: ", len(actual))
+    for i in range(len(predictions)):
+        sum += (predictions[i] - actual[i]) ** 2
+    mse = sum / len(predictions)
+    # print(f'Mean Squared Error: {mse}')
+    # dump the predictions and actual values to a csv file 
+    with open('predictions.csv', 'w') as f:
+        for i in range(len(predictions)):
+            f.write(f'{predictions[i]}, {actual[i]}\n')
+    with open ('mse.txt', 'w') as f:
+        f.write(f'Mean Squared Error: {mse}')
+    return mse
+
+
+# Orchestrates data preparation, validation, and training/inference. It creates parallel processes for training/evaluating models on multiple future chunks.
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('yaml_settings')
@@ -750,6 +848,12 @@ def main():
         proc = Process(target=train_or_eval_model,
                        args=(i, args,
                              raw_in_out[i]['in'], raw_in_out[i]['out'],))
+        # trans_val_df = pd.DataFrame({
+        #         'Actual': raw_in_out[i]['out'] ,
+        #         'Predicted': [None] * len(raw_in_out[i]['out']) # placeholder for predicted values
+        #     })
+        # trans_val_df.to_csv(f'transmission-values-{i}.csv', index=False)
+        
         proc.start()
         proc_list.append(proc)
 
@@ -760,3 +864,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+### Run the code with this command for inferring the predictions
+# python3 ttp.py ../settings.yml --load-model bbr-20220930-1/ --inference

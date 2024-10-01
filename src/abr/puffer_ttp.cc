@@ -244,26 +244,39 @@ void PufferTTP::reinit_sending_time()
 
         for (size_t k = 0; k <= dis_sending_time_; k++) {
           sending_time_prob_[i][j][k] = (k == max_k);
+          /// This value, After determining the index of the most likely sending time (max_k),
+          /// the code assigns a 1 to that sending time (sending_time_prob_[i][j][max_k] = 1) and 0 to all others.
+          /// this for loop would be executed H time were H is the hroizon 
         }
         continue;
       }
 
+     // If MLE (maximum likelihood estimation) is not enabled, the code follows a more probabilistic approach: Pay attention to the continute
+      // in the previous lines, if it is MLE, we don't execute the following code
+      //It iterates over each possible sending time and extracts its probability (output[j][k]).
       double good_prob = 0;
 
       for (size_t k = 0; k < dis_sending_time_; k++) {
         double tmp = output[j][k].item<double>();
+          // If the probability is below a certain threshold (st_prob_eps_), it is set to 0.
 
         if (tmp < st_prob_eps_) {
           sending_time_prob_[i][j][k] = 0;
           continue;
         }
-
+          // Otherwise, the probability is stored in sending_time_prob_[i][j][k], and good_prob 
+        //accumulates the valid probabilities.
         sending_time_prob_[i][j][k] = tmp;
         good_prob += tmp;
       }
-
+      // The remaining probability (1 - good_prob) is assigned to the last sending time (dis_sending_time_). 
+      // This ensures the total probability for all sending times sums to 1.
       sending_time_prob_[i][j][dis_sending_time_] = 1 - good_prob;
-
+      // // print the sending_time_prob_ on console 
+      // cout << "sending_time_prob_[" << i << "][" << j << "]: ";
+      // for (size_t k = 0; k <= dis_sending_time_; k++) {
+      //   cout << sending_time_prob_[i][j][k] << " ";
+      // }
       if (good_prob < ban_prob_) {
         is_ban_[i][j] = true;
       } else {
