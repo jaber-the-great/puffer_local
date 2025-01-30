@@ -12,6 +12,9 @@
 #include <random>
 #include <algorithm>
 #include <pqxx/pqxx>
+#include <random>
+#include <fstream>
+#include <set>
 
 #include "util.hh"
 #include "strict_conversions.hh"
@@ -54,6 +57,62 @@ static string expt_id;
 static map<string, FileDescriptor> log_fds;  /* map log name to fd */
 static const unsigned int MAX_LOG_FILESIZE = 100 * 1024 * 1024;  /* 100 MB */
 static uint64_t last_minute = 0;  /* in ms; multiple of 60000 */
+static const string session_file = "session_ids.txt";
+static map<uint64_t, string> session_ids; /* map connection_id to session_id */
+static set<string> session_id_log;  /* stores all session IDs */
+
+/* load session IDs from file */
+void loadSessionIDs() {
+    ifstream file(session_file);
+    string id;
+    while (getline(file, id)) {
+        if (!id.empty()) {
+            session_id_log.insert(id);
+        }
+    }
+    cerr << "Loaded " << session_id_log.size() << " session IDs." << endl;
+}
+
+/* append a new session ID to file */
+void saveSessionID(const string& new_id) {
+    ofstream file(session_file, ios::app);
+    if (file.is_open()) {
+        file << new_id << "\n";
+    } else {
+        cerr << "Failed to save session ID to file." << endl;
+    }
+}
+
+/* generate unique session ID */
+string generateRandomString(size_t length) {
+    const string chars =
+        "0123456789"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz";
+
+    random_device rd;
+    mt19937 generator(rd());
+    uniform_int_distribution<> distribution(0, chars.size() - 1);
+
+    string randomString;
+    bool is_unique = false;
+
+    while (!is_unique) {
+        randomString.clear();
+        for (size_t i = 0; i < length; ++i) {
+            randomString += chars[distribution(generator)];
+        }
+
+        /* check for unique session ID */
+        if (session_id_log.find(randomString) == session_id_log.end()) {
+            is_unique = true;
+            session_id_log.insert(randomString);
+            saveSessionID(randomString);  
+        }
+    }
+
+    return randomString;
+}
 
 void print_usage(const string & program_name)
 {
@@ -159,6 +218,7 @@ void serve_video_to_client(WebSocketServer & server,
        << ", video " << next_vts << " " << next_vformat << " " << ssim << endl;
 
   if (enable_logging) {
+    string session_id = session_ids[client.connection_id()];
     string log_line = to_string(timestamp_ms()) + "," + channel->name() + ","
       + server_id + "," + expt_id + "," + client.username() + ","
       + to_string(client.first_init_id().value()) + ","
@@ -170,7 +230,8 @@ void serve_video_to_client(WebSocketServer & server,
       + to_string(tcpi.min_rtt) + "," + to_string(tcpi.rtt) + ","
       + to_string(tcpi.delivery_rate) + ","
       + double_to_string(client.video_playback_buf(), 3) + ","
-      + double_to_string(client.cum_rebuffer(), 3);
+      + double_to_string(client.cum_rebuffer(), 3) + ","
+      + session_id;
     append_to_log("video_sent", log_line);
   }
 }
@@ -459,10 +520,12 @@ void handle_client_init(WebSocketServer & server, WebSocketClient & client,
 
   /* record client-init */
   if (enable_logging) {
+    string session_id = session_ids[client.connection_id()];
     string log_line = to_string(timestamp_ms()) + "," + msg.channel
       + "," + server_id + ",init," + expt_id + "," + client.username() + ","
       + to_string(client.first_init_id().value()) + ","
-      + to_string(msg.init_id) + ",0,0" /* buffer cum_rebuf */;
+      + to_string(msg.init_id) + ",0,0" /* buffer cum_rebuf */
+      + "," + session_id;
     append_to_log("client_buffer", log_line);
 
     /* record system information */
@@ -533,6 +596,7 @@ void handle_client_info(WebSocketClient & client, const ClientInfoMsg & msg)
   /* execute the code below only if logging is enabled */
   if (enable_logging) {
     const auto channel_name = client.channel()->name();
+    string session_id = session_ids[client.connection_id()];
 
     /* record client-info */
     string log_line = to_string(timestamp_ms()) + "," + channel_name + ","
@@ -541,7 +605,8 @@ void handle_client_info(WebSocketClient & client, const ClientInfoMsg & msg)
       + to_string(client.first_init_id().value()) + ","
       + to_string(msg.init_id) + ","
       + double_to_string(msg.video_buffer, 3) + ","
-      + double_to_string(msg.cum_rebuffer, 3);
+      + double_to_string(msg.cum_rebuffer, 3) + ","
+      + session_id;
     append_to_log("client_buffer", log_line);
   }
 }
@@ -593,13 +658,15 @@ void handle_client_video_ack(WebSocketClient & client,
 
   /* record client's received video */
   if (enable_logging) {
+    string session_id = session_ids[client.connection_id()];
     string log_line = to_string(timestamp_ms()) + "," + msg.channel + ","
       + server_id + "," + expt_id + "," + client.username() + ","
       + to_string(client.first_init_id().value()) + ","
       + to_string(msg.init_id) + ","
       + to_string(msg.timestamp) + ","
       + to_string(msg.ssim) + "," + double_to_string(msg.video_buffer, 3) + ","
-      + double_to_string(msg.cum_rebuffer, 3);
+      + double_to_string(msg.cum_rebuffer, 3) + ","
+      + session_id;
     append_to_log("video_acked", log_line);
   }
 }
@@ -737,6 +804,9 @@ int run_websocket_server(pqxx::nontransaction & db_work)
   Inotify inotify(server.poller());
   create_channels(inotify);
 
+  /* load session IDs from file */
+  loadSessionIDs();
+
   /* set server callbacks */
   server.set_message_callback(
     [&server, &db_work](const uint64_t connection_id, const WSMessage & ws_msg)
@@ -831,6 +901,12 @@ int run_websocket_server(pqxx::nontransaction & db_work)
             piecewise_construct,
             forward_as_tuple(connection_id),
             forward_as_tuple(connection_id, abr_name, abr_config));
+
+        /* generate unique session_id */
+        string session_id = generateRandomString(32);
+        session_ids[connection_id] = session_id;
+        cerr << "session_id: " << session_id << endl;
+        
       } catch (const exception & e) {
         cerr << client_signature(connection_id)
              << ": warning in open callback: " << e.what() << endl;
@@ -845,6 +921,7 @@ int run_websocket_server(pqxx::nontransaction & db_work)
       try {
         clients.erase(connection_id);
         cerr << connection_id << ": connection closed" << endl;
+        session_ids.erase(connection_id);
       } catch (const exception & e) {
         cerr << client_signature(connection_id)
              << ": warning in close callback: " << e.what() << endl;
