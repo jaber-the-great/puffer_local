@@ -44,6 +44,8 @@ public:
   /* next timestamps to expect; used to resume connection only */
   std::optional<uint64_t> next_vts {};
   std::optional<uint64_t> next_ats {};
+
+  std::optional<std::string> cross_traffic {};
 };
 
 class ClientInfoMsg : public ClientMsg

@@ -25,6 +25,11 @@ ClientInitMsg::ClientInitMsg(const json & msg)
   if (it != msg.end()) {
     next_ats = it->get<uint64_t>();
   }
+
+  it = msg.find("cross_traffic");
+  if (it != msg.end()) {
+    cross_traffic = it->get<std::string>();
+  }
 }
 
 ClientInfoMsg::ClientInfoMsg(const json & msg)

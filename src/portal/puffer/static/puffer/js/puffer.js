@@ -400,7 +400,7 @@ function AVSource(ws_client, server_init) {
 }
 
 function WebSocketClient(session_key, username_in, settings_debug, port_in,
-                         csrf_token_in, sysinfo) {
+                         csrf_token_in, sysinfo, cross_traffic = "") {
   /* if DEBUG = True in settings.py, connect to non-secure WebSocket server */
   debug = settings_debug;
   nonsecure = settings_debug;
@@ -459,7 +459,8 @@ function WebSocketClient(session_key, username_in, settings_debug, port_in,
       os: sysinfo.os,
       browser: sysinfo.browser,
       screenWidth: screen_width,
-      screenHeight: screen_height
+      screenHeight: screen_height,
+      cross_traffic: cross_traffic
     };
 
     /* try resuming if the client is already watching the same channel */

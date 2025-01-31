@@ -60,6 +60,8 @@ static uint64_t last_minute = 0;  /* in ms; multiple of 60000 */
 static const string session_file = "session_ids.txt";
 static map<uint64_t, string> session_ids; /* map connection_id to session_id */
 static set<string> session_id_log;  /* stores all session IDs */
+static map<uint64_t, string> cross_traffic_profiles; /* map connection_id to cross traffic profile */
+static bool cross_traffic_exists = false;
 
 /* load session IDs from file */
 void loadSessionIDs() {
@@ -219,6 +221,12 @@ void serve_video_to_client(WebSocketServer & server,
 
   if (enable_logging) {
     string session_id = session_ids[client.connection_id()];
+    
+    string cross_traffic = "";
+    if (cross_traffic_exists) {
+      cross_traffic = cross_traffic_profiles[client.connection_id()];
+    }
+
     string log_line = to_string(timestamp_ms()) + "," + channel->name() + ","
       + server_id + "," + expt_id + "," + client.username() + ","
       + to_string(client.first_init_id().value()) + ","
@@ -231,7 +239,7 @@ void serve_video_to_client(WebSocketServer & server,
       + to_string(tcpi.delivery_rate) + ","
       + double_to_string(client.video_playback_buf(), 3) + ","
       + double_to_string(client.cum_rebuffer(), 3) + ","
-      + session_id;
+      + session_id + "," + cross_traffic;
     append_to_log("video_sent", log_line);
   }
 }
@@ -496,6 +504,14 @@ bool resume_connection(WebSocketServer & server,
 void handle_client_init(WebSocketServer & server, WebSocketClient & client,
                         const ClientInitMsg & msg)
 {
+  if (msg.cross_traffic and msg.cross_traffic.value() != "") {
+    std::cerr << "Cross Traffic Profile: " << msg.cross_traffic.value() << std::endl;
+    cross_traffic_profiles[client.connection_id()] = msg.cross_traffic.value();
+    cross_traffic_exists = true;
+  } else {
+    std::cerr << "Cross traffic profile not provided" << std::endl;
+  }
+  
   /* always set client's init_id when a client-init is received */
   client.set_init_id(msg.init_id);
 
@@ -521,11 +537,17 @@ void handle_client_init(WebSocketServer & server, WebSocketClient & client,
   /* record client-init */
   if (enable_logging) {
     string session_id = session_ids[client.connection_id()];
+
+    string cross_traffic = "";
+    if (cross_traffic_exists) {
+      cross_traffic = cross_traffic_profiles[client.connection_id()];
+    }
+
     string log_line = to_string(timestamp_ms()) + "," + msg.channel
       + "," + server_id + ",init," + expt_id + "," + client.username() + ","
       + to_string(client.first_init_id().value()) + ","
       + to_string(msg.init_id) + ",0,0" /* buffer cum_rebuf */
-      + "," + session_id;
+      + "," + session_id + "," + cross_traffic;
     append_to_log("client_buffer", log_line);
 
     /* record system information */
@@ -597,6 +619,11 @@ void handle_client_info(WebSocketClient & client, const ClientInfoMsg & msg)
   if (enable_logging) {
     const auto channel_name = client.channel()->name();
     string session_id = session_ids[client.connection_id()];
+    
+    string cross_traffic = "";
+    if (cross_traffic_exists) {
+      cross_traffic = cross_traffic_profiles[client.connection_id()];
+    }
 
     /* record client-info */
     string log_line = to_string(timestamp_ms()) + "," + channel_name + ","
@@ -606,7 +633,7 @@ void handle_client_info(WebSocketClient & client, const ClientInfoMsg & msg)
       + to_string(msg.init_id) + ","
       + double_to_string(msg.video_buffer, 3) + ","
       + double_to_string(msg.cum_rebuffer, 3) + ","
-      + session_id;
+      + session_id + "," + cross_traffic;
     append_to_log("client_buffer", log_line);
   }
 }
@@ -659,6 +686,12 @@ void handle_client_video_ack(WebSocketClient & client,
   /* record client's received video */
   if (enable_logging) {
     string session_id = session_ids[client.connection_id()];
+    
+    string cross_traffic = "";
+    if (cross_traffic_exists) {
+      cross_traffic = cross_traffic_profiles[client.connection_id()];
+    }
+
     string log_line = to_string(timestamp_ms()) + "," + msg.channel + ","
       + server_id + "," + expt_id + "," + client.username() + ","
       + to_string(client.first_init_id().value()) + ","
@@ -666,7 +699,7 @@ void handle_client_video_ack(WebSocketClient & client,
       + to_string(msg.timestamp) + ","
       + to_string(msg.ssim) + "," + double_to_string(msg.video_buffer, 3) + ","
       + double_to_string(msg.cum_rebuffer, 3) + ","
-      + session_id;
+      + session_id + "," + cross_traffic;
     append_to_log("video_acked", log_line);
   }
 }
