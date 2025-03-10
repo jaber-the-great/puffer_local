@@ -284,6 +284,7 @@ TCPInfo TCPSocket::get_tcp_info() const
   ret.min_rtt = x.tcpi_min_rtt;
   ret.rtt = x.tcpi_rtt;
   ret.delivery_rate = x.tcpi_delivery_rate;
+  ret.lost = x.tcpi_lost;
 
   return ret;
 }

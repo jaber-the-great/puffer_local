@@ -85,6 +85,7 @@ struct TCPInfo
   uint32_t min_rtt;   /* minimum RTT in microsecond */
   uint32_t rtt;       /* RTT in microsecond */
   uint64_t delivery_rate;  /* bytes per second */
+  uint64_t lost;     /* loss rate */
 };
 
 /* TCP socket */
