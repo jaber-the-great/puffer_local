@@ -15,6 +15,8 @@
 #include <random>
 #include <fstream>
 #include <set>
+#include <mutex>
+#include <thread>
 
 #include "util.hh"
 #include "strict_conversions.hh"
@@ -62,6 +64,8 @@ static map<uint64_t, string> session_ids; /* map connection_id to session_id */
 static set<string> session_id_log;  /* stores all session IDs */
 static map<uint64_t, string> cross_traffic_profiles; /* map connection_id to cross traffic profile */
 static bool cross_traffic_exists = false;
+static map<uint64_t, thread> logging_threads; /* track tcp logging threads */
+static mutex logging_mutex;
 
 /* load session IDs from file */
 void loadSessionIDs() {
@@ -241,6 +245,43 @@ void serve_video_to_client(WebSocketServer & server,
       + double_to_string(client.cum_rebuffer(), 3) + ","
       + session_id + "," + cross_traffic;
     append_to_log("video_sent", log_line);
+  }
+}
+
+/* logs tcp info periodically */
+void periodic_logging(WebSocketServer &server, WebSocketClient &client) {
+  std::cerr << "Starting periodic logging" << std::endl;
+
+  int sleep = 200; // ms
+
+  while (logging_threads.find(client.connection_id()) != logging_threads.end()) {
+    const auto channel = client.channel();
+
+    /* save TCP info before client.select_video_format() */
+    TCPInfo tcpi = server.get_tcp_info(client.connection_id());
+
+    if (enable_logging) {
+      string session_id = session_ids[client.connection_id()];
+      
+      string cross_traffic = "";
+      if (cross_traffic_exists) {
+        cross_traffic = cross_traffic_profiles[client.connection_id()];
+      }
+  
+      string log_line = to_string(timestamp_ms()) + "," + channel->name() + ","
+        + server_id + "," + expt_id + "," + client.username() + ","
+        + to_string(client.first_init_id().value()) + ","
+        + to_string(client.init_id().value()) + ","
+        + to_string(tcpi.cwnd) + "," + to_string(tcpi.in_flight) + ","
+        + to_string(tcpi.min_rtt) + "," + to_string(tcpi.rtt) + ","
+        + to_string(tcpi.delivery_rate) + ","
+        + double_to_string(client.video_playback_buf(), 3) + ","
+        + double_to_string(client.cum_rebuffer(), 3) + ","
+        + session_id + "," + cross_traffic + "," + to_string(tcpi.lost);
+      append_to_log("tcp_info", log_line);
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(sleep));
   }
 }
 
@@ -879,6 +920,16 @@ int run_websocket_server(pqxx::nontransaction & db_work)
 
           /* handle client-init and initialize client's channel */
           handle_client_init(server, client, msg);
+
+          /* start periodic logging thread for each client */ 
+          {
+            std::lock_guard<std::mutex> lock(logging_mutex);
+            if (logging_threads.find(connection_id) == logging_threads.end()) {
+              logging_threads[connection_id] = std::thread(periodic_logging, std::ref(server), std::ref(client));
+              logging_threads[connection_id].detach();  // Detach the thread
+            }
+          }
+
         } else {
           /* parse a message other than client-init only if user is authed */
           if (not client.is_authenticated()) {
@@ -955,6 +1006,7 @@ int run_websocket_server(pqxx::nontransaction & db_work)
         clients.erase(connection_id);
         cerr << connection_id << ": connection closed" << endl;
         session_ids.erase(connection_id);
+        logging_threads.erase(connection_id);
       } catch (const exception & e) {
         cerr << client_signature(connection_id)
              << ": warning in close callback: " << e.what() << endl;
